@@ -16,7 +16,7 @@ export async function POST(req: NextRequest) {
     supabase
       .from('solventis_deals')
       .insert([{ company_name, industry, location, revenue_range, ebitda_range, transaction_type, timeline, description, contact_name, contact_title, contact_email, contact_phone, status: 'new' }])
-      .select().single().then(() => {}).catch(console.error)
+      .select().single().then(() => {}, console.error)
 
     await Promise.all([
       resend.emails.send({
