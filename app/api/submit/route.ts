@@ -21,7 +21,8 @@ export async function POST(req: NextRequest) {
     await Promise.all([
       resend.emails.send({
         from: process.env.FROM_EMAIL ?? 'info@solventisbaa.com',
-        to: process.env.NOTIFICATION_EMAIL ?? 'Ethan.W@Delcapmanagement.com',
+        to: 'info@solventisbaa.com',
+        cc: ['Ethan.W@Delcapmanagement.com'],
         subject: `New Deal Submission: ${company_name} — ${transaction_type}`,
         html: `<div style="font-family:Georgia,serif;max-width:600px;margin:0 auto;padding:40px 20px;background:#F2ECE2"><div style="background:#1C1610;padding:24px 32px;margin-bottom:32px"><h2 style="color:#C8A040;margin:0;font-size:20px">New Deal Submission</h2><p style="color:#C8BCA8;margin:6px 0 0;font-size:12px;letter-spacing:0.15em;text-transform:uppercase">Solventis Bankers & Advisors</p></div><table style="width:100%;border-collapse:collapse">${[['Company',company_name],['Transaction',transaction_type],['Industry',industry||'—'],['Location',location||'—'],['Revenue',revenue_range||'—'],['EBITDA',ebitda_range||'—'],['Timeline',timeline||'—'],['Contact',`${contact_name}${contact_title?', '+contact_title:''}`],['Email',contact_email],['Phone',contact_phone||'—']].map(([k,v])=>`<tr style="border-bottom:1px solid rgba(100,70,18,0.15)"><td style="padding:12px 0;color:#7A5010;font-size:11px;letter-spacing:0.15em;text-transform:uppercase;width:120px">${k}</td><td style="padding:12px 0;color:#1C1610;font-size:16px">${v}</td></tr>`).join('')}</table>${description?`<div style="margin-top:24px;padding:20px;background:#EAE3D6;border-left:3px solid #7A5010"><div style="color:#7A5010;font-size:11px;letter-spacing:0.15em;text-transform:uppercase;margin-bottom:10px">Overview</div><div style="color:#2E2418;font-size:16px;line-height:1.7">${description}</div></div>`:''}</div>`
       }),
