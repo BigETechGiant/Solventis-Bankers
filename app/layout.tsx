@@ -4,6 +4,11 @@ import './globals.css'
 export const metadata: Metadata = {
   title: 'Solventis Bankers & Advisors | Investment Banking',
   description: 'Trusted investment banking advisory. Mergers & acquisitions, capital raising, IPO advisory, and financial restructuring for the middle market.',
+  icons: {
+    icon: '/logo.png',
+    apple: '/logo.png',
+    shortcut: '/logo.png',
+  },
 }
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
