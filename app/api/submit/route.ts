@@ -1,17 +1,210 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { Resend } from 'resend'
+import { Ratelimit } from '@upstash/ratelimit'
+import { Redis } from '@upstash/redis'
+import { createHmac, timingSafeEqual } from 'node:crypto'
 
-const resend = new Resend(process.env.RESEND_API_KEY)
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-)
+// This route deals with signed tokens, HMAC and Redis — force the Node.js runtime.
+export const runtime = 'nodejs'
+export const dynamic = 'force-dynamic'
 
+// Clients are created lazily inside the handler so the route module can be
+// evaluated at build time without the secrets being present.
+const getResend = () => new Resend(process.env.RESEND_API_KEY)
+const getSupabase = () =>
+  createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!)
+
+// ── Anti-spam configuration ────────────────────────────────────────────────
+const MIN_FILL_MS = 3_000 // reject submissions completed in under 3 seconds
+const MAX_FILL_MS = 2 * 60 * 60 * 1000 // ...or older than 2 hours
+
+// Secret used to sign the form-render timing token. Falls back to the service
+// role key (always present) so the check keeps working even if the dedicated
+// var is not set, without ever using a hardcoded key in production.
+const TIMING_SECRET =
+  process.env.FORM_TIMING_SECRET || process.env.SUPABASE_SERVICE_ROLE_KEY || 'solventis-dev-timing-secret'
+
+// Rate limiter — only enabled when Upstash Redis env vars are present, so the
+// site still functions in environments where Redis is not configured.
+const ratelimit =
+  process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN
+    ? new Ratelimit({
+        redis: Redis.fromEnv(),
+        limiter: Ratelimit.slidingWindow(5, '1 h'),
+        prefix: 'solventis:submit',
+        analytics: false,
+      })
+    : null
+
+// A small, high-signal list of throwaway/disposable email providers. Kept
+// intentionally short and lenient — this is a spam filter, not an allow-list.
+const DISPOSABLE_DOMAINS = new Set([
+  'mailinator.com', 'guerrillamail.com', 'guerrillamail.info', 'sharklasers.com',
+  '10minutemail.com', '10minutemail.net', 'tempmail.com', 'temp-mail.org',
+  'throwawaymail.com', 'yopmail.com', 'yopmail.fr', 'trashmail.com',
+  'getnada.com', 'nada.email', 'dispostable.com', 'maildrop.cc',
+  'fakeinbox.com', 'mailnesia.com', 'mailcatch.com', 'spam4.me',
+  'grr.la', 'guerrillamailblock.com', 'mytemp.email', 'tempmailo.com',
+  'moakt.com', 'emailondeck.com', 'mohmal.com', 'burnermail.io',
+  'tempr.email', 'discard.email', 'mailexpire.com', 'mintemail.com',
+])
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/
+
+// ── Timing token helpers ───────────────────────────────────────────────────
+function signTimestamp(ts: number): string {
+  const sig = createHmac('sha256', TIMING_SECRET).update(String(ts)).digest('hex')
+  return `${ts}.${sig}`
+}
+
+function verifyTimingToken(token: unknown): { ok: boolean } {
+  if (typeof token !== 'string' || !token.includes('.')) return { ok: false }
+  const [tsRaw, sig] = token.split('.')
+  const ts = Number(tsRaw)
+  if (!Number.isFinite(ts) || !sig) return { ok: false }
+
+  const expected = createHmac('sha256', TIMING_SECRET).update(tsRaw).digest('hex')
+  const a = Buffer.from(sig)
+  const b = Buffer.from(expected)
+  if (a.length !== b.length || !timingSafeEqual(a, b)) return { ok: false }
+
+  const age = Date.now() - ts
+  if (age < MIN_FILL_MS || age > MAX_FILL_MS) return { ok: false }
+  return { ok: true }
+}
+
+// ── Turnstile verification ─────────────────────────────────────────────────
+async function verifyTurnstile(token: unknown, ip: string): Promise<boolean> {
+  const secret = process.env.TURNSTILE_SECRET_KEY
+  // If Turnstile is not configured, skip verification (lenient in dev/rollout).
+  if (!secret) return true
+  if (typeof token !== 'string' || !token) return false
+
+  try {
+    const form = new URLSearchParams()
+    form.append('secret', secret)
+    form.append('response', token)
+    if (ip) form.append('remoteip', ip)
+
+    const res = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: form,
+    })
+    const data = (await res.json()) as { success?: boolean }
+    return data.success === true
+  } catch {
+    // Fail closed on any error verifying the token.
+    return false
+  }
+}
+
+function getClientIp(req: NextRequest): string {
+  const xff = req.headers.get('x-forwarded-for')
+  if (xff) return xff.split(',')[0].trim()
+  return req.headers.get('x-real-ip') || '127.0.0.1'
+}
+
+function countUrls(text: string): number {
+  const matches = text.match(/(https?:\/\/|www\.)/gi)
+  return matches ? matches.length : 0
+}
+
+// A generic "success" that reveals nothing to a bot about why it was dropped.
+const fakeSuccess = () => NextResponse.json({ success: true })
+
+// ── GET: issue a signed render token + expose the Turnstile site key ────────
+// The form is a client component and we intentionally keep the site key in a
+// non-public env var, so it is delivered here at render time instead.
+export async function GET() {
+  return NextResponse.json(
+    {
+      ts_token: signTimestamp(Date.now()),
+      turnstile_site_key: process.env.TURNSTILE_SITE_KEY ?? '',
+    },
+    { headers: { 'Cache-Control': 'no-store, max-age=0' } }
+  )
+}
+
+// ── POST: run every check before touching Supabase or Resend ───────────────
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json()
-    const { company_name, industry, location, revenue_range, ebitda_range, transaction_type, timeline, description, contact_name, contact_title, contact_email, contact_phone } = body
+    const {
+      company_name, industry, location, revenue_range, ebitda_range,
+      transaction_type, timeline, description, contact_name, contact_title,
+      contact_email, contact_phone,
+      // anti-spam fields
+      company_fax, ts_token, turnstile_token,
+    } = body ?? {}
+
+    // 1. HONEYPOT — a real user never sees or fills this. Pretend success.
+    if (typeof company_fax === 'string' && company_fax.trim() !== '') {
+      return fakeSuccess()
+    }
+
+    // 2. RATE LIMIT — 5 submissions per IP per hour.
+    if (ratelimit) {
+      const ip = getClientIp(req)
+      const { success, reset } = await ratelimit.limit(ip)
+      if (!success) {
+        const retryAfter = Math.max(1, Math.ceil((reset - Date.now()) / 1000))
+        return NextResponse.json(
+          { error: 'Too many submissions. Please try again later.' },
+          { status: 429, headers: { 'Retry-After': String(retryAfter) } }
+        )
+      }
+    }
+
+    // 3. TIMING TRAP — too fast (bot) or too stale (replay). Pretend success.
+    if (!verifyTimingToken(ts_token).ok) {
+      return fakeSuccess()
+    }
+
+    // 4. CLOUDFLARE TURNSTILE — fail closed. Return a real error so a genuine
+    //    user whose challenge expired can retry.
+    const ip = getClientIp(req)
+    if (!(await verifyTurnstile(turnstile_token, ip))) {
+      return NextResponse.json(
+        { error: 'Verification failed. Please complete the challenge and try again.' },
+        { status: 403 }
+      )
+    }
+
+    // 5. VALIDATION — lenient, real errors so legitimate users can correct.
+    const name = typeof company_name === 'string' ? company_name.trim() : ''
+    const cName = typeof contact_name === 'string' ? contact_name.trim() : ''
+    const email = typeof contact_email === 'string' ? contact_email.trim() : ''
+    const desc = typeof description === 'string' ? description : ''
+
+    if (!name || name.length > 200) {
+      return NextResponse.json({ error: 'Please provide a valid company name.' }, { status: 400 })
+    }
+    if (!cName || cName.length > 120) {
+      return NextResponse.json({ error: 'Please provide a valid contact name.' }, { status: 400 })
+    }
+    if (!email || email.length > 254 || !EMAIL_RE.test(email)) {
+      return NextResponse.json({ error: 'Please provide a valid email address.' }, { status: 400 })
+    }
+    const domain = email.split('@')[1]?.toLowerCase() ?? ''
+    if (DISPOSABLE_DOMAINS.has(domain)) {
+      return NextResponse.json(
+        { error: 'Please use a permanent business email address.' },
+        { status: 400 }
+      )
+    }
+    if (desc.length > 5000) {
+      return NextResponse.json({ error: 'Overview is too long.' }, { status: 400 })
+    }
+    // 3+ links in the body is a strong spam signal — drop silently.
+    if (countUrls(desc) >= 3) {
+      return fakeSuccess()
+    }
+
+    // ── All checks passed: persist and notify ─────────────────────────────
+    const resend = getResend()
+    const supabase = getSupabase()
 
     supabase
       .from('solventis_deals')

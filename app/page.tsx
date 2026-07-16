@@ -2,6 +2,16 @@
 
 import { useState, useEffect, useRef, FormEvent } from 'react'
 
+declare global {
+  interface Window {
+    turnstile?: {
+      render: (el: HTMLElement, opts: Record<string, unknown>) => string
+      reset: (id?: string) => void
+      remove: (id?: string) => void
+    }
+  }
+}
+
 type FormState = {
   company_name: string
   industry: string
@@ -41,6 +51,59 @@ export default function Home() {
   const [form, setForm] = useState<FormState>(initialForm)
   const revealRefs = useRef<HTMLElement[]>([])
 
+  // ── Anti-spam state ──────────────────────────────────────────────────────
+  const [tsToken, setTsToken] = useState('') // signed form-render timing token
+  const [siteKey, setSiteKey] = useState('') // Cloudflare Turnstile site key
+  const [turnstileToken, setTurnstileToken] = useState('')
+  const honeypotRef = useRef<HTMLInputElement>(null)
+  const turnstileElRef = useRef<HTMLDivElement>(null)
+  const widgetIdRef = useRef<string | null>(null)
+
+  // Fetch a fresh signed timing token + the Turnstile site key on mount.
+  const loadToken = () =>
+    fetch('/api/submit')
+      .then((r) => r.json())
+      .then((d) => {
+        setTsToken(d.ts_token || '')
+        setSiteKey(d.turnstile_site_key || '')
+      })
+      .catch(() => {})
+
+  useEffect(() => {
+    loadToken()
+  }, [])
+
+  // Load the Turnstile script and explicitly render the widget once we have a site key.
+  useEffect(() => {
+    if (!siteKey) return
+    const renderWidget = () => {
+      if (!window.turnstile || !turnstileElRef.current || widgetIdRef.current) return
+      widgetIdRef.current = window.turnstile.render(turnstileElRef.current, {
+        sitekey: siteKey,
+        theme: 'light',
+        callback: (t: string) => setTurnstileToken(t),
+        'expired-callback': () => setTurnstileToken(''),
+        'error-callback': () => setTurnstileToken(''),
+      })
+    }
+    if (window.turnstile) {
+      renderWidget()
+      return
+    }
+    const id = 'cf-turnstile-script'
+    let script = document.getElementById(id) as HTMLScriptElement | null
+    if (!script) {
+      script = document.createElement('script')
+      script.id = id
+      script.src = 'https://challenges.cloudflare.com/turnstile/api.js?render=explicit'
+      script.async = true
+      script.defer = true
+      document.head.appendChild(script)
+    }
+    script.addEventListener('load', renderWidget)
+    return () => script?.removeEventListener('load', renderWidget)
+  }, [siteKey])
+
   useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 30)
     window.addEventListener('scroll', onScroll, { passive: true })
@@ -71,20 +134,52 @@ export default function Home() {
     setForm({ ...form, [e.target.name]: e.target.value })
   }
 
+  const resetTurnstile = () => {
+    setTurnstileToken('')
+    if (widgetIdRef.current && window.turnstile) {
+      window.turnstile.reset(widgetIdRef.current)
+    }
+  }
+
   const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault()
+
+    // If Turnstile is active, require the challenge to be completed first.
+    if (siteKey && !turnstileToken) {
+      alert('Please complete the verification challenge before submitting.')
+      return
+    }
+
     setSubmitting(true)
     try {
       const res = await fetch('/api/submit', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(form),
+        body: JSON.stringify({
+          ...form,
+          company_fax: honeypotRef.current?.value ?? '',
+          ts_token: tsToken,
+          turnstile_token: turnstileToken,
+        }),
       })
-      if (!res.ok) throw new Error('Submission failed')
+      if (!res.ok) {
+        let message = 'There was a problem submitting your inquiry. Please try again or email us directly.'
+        if (res.status === 429) {
+          message = 'You have submitted several inquiries recently. Please try again later or email us directly.'
+        } else {
+          const data = await res.json().catch(() => null)
+          if (data?.error) message = data.error
+        }
+        resetTurnstile()
+        throw new Error(message)
+      }
       setShowSuccess(true)
       setForm(initialForm)
+      resetTurnstile()
+      // Issue a fresh timing token for any subsequent submission.
+      loadToken()
     } catch (err) {
-      alert('There was a problem submitting your inquiry. Please try again or email us directly.')
+      alert(err instanceof Error ? err.message : 'There was a problem submitting your inquiry. Please try again or email us directly.')
     } finally {
       setSubmitting(false)
     }
@@ -463,6 +558,31 @@ export default function Home() {
 
             <div className="submit-r rev">
               <form className="form-box" onSubmit={handleSubmit}>
+                {/* Honeypot — hidden from real users, catches bots. Not display:none. */}
+                <div
+                  aria-hidden="true"
+                  style={{
+                    position: 'absolute',
+                    left: '-9999px',
+                    top: 'auto',
+                    width: '1px',
+                    height: '1px',
+                    overflow: 'hidden',
+                    opacity: 0,
+                  }}
+                >
+                  <label htmlFor="company_fax">Company Fax (leave blank)</label>
+                  <input
+                    ref={honeypotRef}
+                    type="text"
+                    id="company_fax"
+                    name="company_fax"
+                    tabIndex={-1}
+                    autoComplete="off"
+                    defaultValue=""
+                  />
+                </div>
+
                 <div className="fsec">Company</div>
                 <div className="fg">
                   <label className="fl">Company Name *</label>
@@ -560,6 +680,14 @@ export default function Home() {
                     <input className="fi" type="tel" name="contact_phone" value={form.contact_phone} onChange={handleChange} />
                   </div>
                 </div>
+
+                {siteKey && (
+                  <div
+                    ref={turnstileElRef}
+                    className="cf-turnstile"
+                    style={{ marginBottom: '18px' }}
+                  />
+                )}
 
                 <button type="submit" className="fsub" disabled={submitting}>
                   {submitting ? 'Submitting…' : 'Submit for Confidential Review'}
