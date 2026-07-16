@@ -25,17 +25,51 @@ const MAX_FILL_MS = 2 * 60 * 60 * 1000 // ...or older than 2 hours
 const TIMING_SECRET =
   process.env.FORM_TIMING_SECRET || process.env.SUPABASE_SERVICE_ROLE_KEY || 'solventis-dev-timing-secret'
 
-// Rate limiter — only enabled when Upstash Redis env vars are present, so the
-// site still functions in environments where Redis is not configured.
+// Rate limiter — the Upstash Redis credentials can arrive under several env var
+// names depending on how the project is provisioned. The Vercel–Upstash
+// integration commonly injects KV_REST_API_URL / KV_REST_API_TOKEN (or
+// REST_API_* variants) rather than the canonical UPSTASH_REDIS_REST_* names, so
+// we resolve each from the first candidate that is set.
+function resolveEnv(names: string[]): { name: string; value: string } | null {
+  for (const name of names) {
+    const value = process.env[name]
+    if (value && value.trim() !== '') return { name, value }
+  }
+  return null
+}
+
+const redisUrl = resolveEnv([
+  'UPSTASH_REDIS_REST_URL',
+  'KV_REST_API_URL',
+  'REST_API_URL',
+])
+const redisToken = resolveEnv([
+  'UPSTASH_REDIS_REST_TOKEN',
+  'KV_REST_API_TOKEN',
+  'REST_API_TOKEN',
+])
+
+// Build the limiter from the resolved values (fail open if either is missing, so
+// the form keeps working even when Redis is not configured).
 const ratelimit =
-  process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN
+  redisUrl && redisToken
     ? new Ratelimit({
-        redis: Redis.fromEnv(),
+        redis: new Redis({ url: redisUrl.value, token: redisToken.value }),
         limiter: Ratelimit.slidingWindow(5, '1 h'),
         prefix: 'solventis:submit',
         analytics: false,
       })
     : null
+
+// Startup log so the active configuration is confirmable from the Vercel logs.
+if (ratelimit) {
+  console.log(
+    `[submit] Rate limiting ACTIVE — resolved URL from ${redisUrl!.name}, token from ${redisToken!.name}`
+  )
+} else {
+  console.warn('Upstash rate limiting disabled: no Redis credentials found')
+  console.log('[submit] Rate limiting DISABLED — form will continue without it (fail open)')
+}
 
 // A small, high-signal list of throwaway/disposable email providers. Kept
 // intentionally short and lenient — this is a spam filter, not an allow-list.
