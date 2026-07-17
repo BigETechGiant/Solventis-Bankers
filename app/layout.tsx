@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from 'next'
 import './globals.css'
+import ServiceWorkerHeal from './sw-heal'
 
 export const metadata: Metadata = {
   title: 'Solventis Bankers & Advisors | Investment Banking',
@@ -32,7 +33,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
         <meta name="apple-mobile-web-app-title" content="Solventis" />
       </head>
-      <body>{children}</body>
+      <body>
+        <ServiceWorkerHeal />
+        {children}
+      </body>
     </html>
   )
 }

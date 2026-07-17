@@ -32,6 +32,24 @@ const withPWA = nextPwa({
 })
 
 /** @type {import('next').NextConfig} */
-const nextConfig = {}
+const nextConfig = {
+  // Guard against cross-origin isolation. The Cloudflare Turnstile widget loads a
+  // cross-origin script and iframe from https://challenges.cloudflare.com, which
+  // a `Cross-Origin-Embedder-Policy: require-corp` document would block. This
+  // repo sets no such header today, but we assert `unsafe-none` (the browser
+  // default) explicitly so no edge/proxy layer or future change can silently
+  // isolate the page and break the widget. This loosens nothing versus the
+  // current behaviour — it only pins it.
+  async headers() {
+    return [
+      {
+        source: '/:path*',
+        headers: [
+          { key: 'Cross-Origin-Embedder-Policy', value: 'unsafe-none' },
+        ],
+      },
+    ]
+  },
+}
 
 export default withPWA(nextConfig)
