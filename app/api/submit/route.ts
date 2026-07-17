@@ -248,31 +248,70 @@ export async function POST(req: NextRequest) {
     if (dbError) console.error('[submit] Supabase insert FAILED:', dbError)
     else console.log('[submit] Lead saved to Supabase')
 
-    // Resend's SDK RESOLVES with { data, error } instead of throwing on API
-    // failures (unverified domain, invalid key, sandbox recipient limits, …),
-    // so we MUST inspect each result — otherwise a silently-rejected send still
-    // looks like success and no email ever arrives.
-    const [adminRes, confirmRes] = await Promise.all([
-      resend.emails.send({
-        from: process.env.FROM_EMAIL ?? 'info@solventisbaa.com',
-        to: 'info@solventisbaa.com',
-        cc: ['Ethan.W@Delcapmanagement.com'],
-        subject: `New Deal Submission: ${company_name} — ${transaction_type}`,
-        html: `<div style="font-family:Georgia,serif;max-width:600px;margin:0 auto;padding:40px 20px;background:#F2ECE2"><div style="background:#1C1610;padding:24px 32px;margin-bottom:32px"><h2 style="color:#C8A040;margin:0;font-size:20px">New Deal Submission</h2><p style="color:#C8BCA8;margin:6px 0 0;font-size:12px;letter-spacing:0.15em;text-transform:uppercase">Solventis Bankers & Advisors</p></div><table style="width:100%;border-collapse:collapse">${[['Company',company_name],['Transaction',transaction_type],['Industry',industry||'—'],['Location',location||'—'],['Revenue',revenue_range||'—'],['EBITDA',ebitda_range||'—'],['Timeline',timeline||'—'],['Contact',`${contact_name}${contact_title?', '+contact_title:''}`],['Email',contact_email],['Phone',contact_phone||'—']].map(([k,v])=>`<tr style="border-bottom:1px solid rgba(100,70,18,0.15)"><td style="padding:12px 0;color:#7A5010;font-size:11px;letter-spacing:0.15em;text-transform:uppercase;width:120px">${k}</td><td style="padding:12px 0;color:#1C1610;font-size:16px">${v}</td></tr>`).join('')}</table>${description?`<div style="margin-top:24px;padding:20px;background:#EAE3D6;border-left:3px solid #7A5010"><div style="color:#7A5010;font-size:11px;letter-spacing:0.15em;text-transform:uppercase;margin-bottom:10px">Overview</div><div style="color:#2E2418;font-size:16px;line-height:1.7">${description}</div></div>`:''}</div>`
-      }),
-      resend.emails.send({
-        from: process.env.FROM_EMAIL ?? 'info@solventisbaa.com',
-        to: contact_email,
-        replyTo: process.env.NOTIFICATION_EMAIL,
-        subject: 'Your submission has been received — Solventis Bankers & Advisors',
-        html: `<div style="font-family:Georgia,serif;max-width:600px;margin:0 auto;padding:40px 20px;background:#F2ECE2"><div style="background:#1C1610;padding:24px 32px;margin-bottom:32px"><h2 style="color:#C8A040;margin:0;font-size:18px">Solventis Bankers & Advisors</h2><p style="color:#C8BCA8;margin:6px 0 0;font-size:11px;letter-spacing:0.2em;text-transform:uppercase">Investment Banking Advisory</p></div><p style="color:#1C1610;font-size:18px;line-height:1.75;margin-bottom:20px">Dear ${contact_name},</p><p style="color:#695C4C;font-size:17px;line-height:1.85;margin-bottom:20px">Thank you for reaching out to Solventis Bankers & Advisors. We have received your submission regarding <strong style="color:#1C1610">${company_name}</strong> and will review it personally.</p><p style="color:#695C4C;font-size:17px;line-height:1.85;margin-bottom:32px">If your transaction is a fit for our practice, we will reach out within two business days to schedule a confidential introductory conversation.</p><div style="border-top:1px solid rgba(100,70,18,0.2);padding-top:24px"><p style="color:#1C1610;font-size:15px;line-height:1.6;margin:0"><strong>Solventis Bankers & Advisors</strong><br/>801 Travis St, Suite 800 · Houston, TX 77002<br/><a href="tel:7135648192" style="color:#7A5010">713-564-8192</a> · <a href="https://solventisbaa.com" style="color:#7A5010">solventisbaa.com</a></p><p style="color:#8A7B6C;font-size:11px;margin-top:16px">Investment banking services provided through a registered representative of Finalis Securities LLC, Member FINRA/SIPC.</p></div></div>`
-      })
-    ])
+    // Resolve addressing up front so we can log EXACTLY what Resend is asked to
+    // send. Resend requires a FULL mailbox for `from` (e.g. noreply@solventisbaa.com)
+    // on a verified domain — a bare domain is silently rejected. Flag it loudly.
+    const fromEmail = process.env.FROM_EMAIL ?? 'info@solventisbaa.com'
+    const notificationEmail = process.env.NOTIFICATION_EMAIL
+    const adminTo = 'info@solventisbaa.com'
+    const adminCc = ['Ethan.W@Delcapmanagement.com']
+    const adminSubject = `New Deal Submission: ${company_name} — ${transaction_type}`
+    const confirmSubject = 'Your submission has been received — Solventis Bankers & Advisors'
+    const ADDR_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
-    if (adminRes.error) console.error('[submit] Admin notification email FAILED:', adminRes.error)
-    else console.log('[submit] Admin notification email sent, id:', adminRes.data?.id)
-    if (confirmRes.error) console.error('[submit] Applicant confirmation email FAILED:', confirmRes.error)
-    else console.log('[submit] Confirmation email sent, id:', confirmRes.data?.id)
+    if (!ADDR_RE.test(fromEmail)) {
+      console.error(`[submit] FROM_EMAIL is NOT a full email address: "${fromEmail}". Resend needs e.g. noreply@solventisbaa.com on a verified domain, not a bare domain.`)
+    }
+    if (notificationEmail && !ADDR_RE.test(notificationEmail)) {
+      console.error(`[submit] NOTIFICATION_EMAIL is not a valid address: "${notificationEmail}"`)
+    }
+    console.log(
+      '[submit] Resend request config:',
+      JSON.stringify({
+        from: fromEmail,
+        admin: { to: adminTo, cc: adminCc, subject: adminSubject },
+        confirmation: { to: contact_email, replyTo: notificationEmail ?? null, subject: confirmSubject },
+      })
+    )
+
+    // Resend's SDK RESOLVES with { data, error } instead of throwing on API
+    // failures (unverified domain, invalid key, suppressed recipient, …), and
+    // can THROW on transport errors. Log BOTH the full response and any caught
+    // error (name + message) so nothing is ever silent. Never log the API key.
+    type SendResult = { data: { id?: string } | null; error: { name?: string; message?: string } | null }
+    const sendAndLog = async (label: string, thunk: () => Promise<SendResult>): Promise<SendResult> => {
+      try {
+        const res = await thunk()
+        console.log(`[submit] ${label} — full Resend response:`, JSON.stringify(res))
+        if (res.error) {
+          console.error(`[submit] ${label} — Resend returned error: name=${res.error.name} message=${res.error.message}`)
+        } else {
+          console.log(`[submit] ${label} — accepted by Resend, id=${res.data?.id}`)
+        }
+        return res
+      } catch (err) {
+        const e = err as { name?: string; message?: string }
+        console.error(`[submit] ${label} — Resend send THREW: name=${e?.name} message=${e?.message}`, err)
+        return { data: null, error: { name: e?.name ?? 'Error', message: e?.message ?? String(err) } }
+      }
+    }
+
+    const [adminRes, confirmRes] = await Promise.all([
+      sendAndLog('admin-notification', () => resend.emails.send({
+        from: fromEmail,
+        to: adminTo,
+        cc: adminCc,
+        subject: adminSubject,
+        html: `<div style="font-family:Georgia,serif;max-width:600px;margin:0 auto;padding:40px 20px;background:#F2ECE2"><div style="background:#1C1610;padding:24px 32px;margin-bottom:32px"><h2 style="color:#C8A040;margin:0;font-size:20px">New Deal Submission</h2><p style="color:#C8BCA8;margin:6px 0 0;font-size:12px;letter-spacing:0.15em;text-transform:uppercase">Solventis Bankers & Advisors</p></div><table style="width:100%;border-collapse:collapse">${[['Company',company_name],['Transaction',transaction_type],['Industry',industry||'—'],['Location',location||'—'],['Revenue',revenue_range||'—'],['EBITDA',ebitda_range||'—'],['Timeline',timeline||'—'],['Contact',`${contact_name}${contact_title?', '+contact_title:''}`],['Email',contact_email],['Phone',contact_phone||'—']].map(([k,v])=>`<tr style="border-bottom:1px solid rgba(100,70,18,0.15)"><td style="padding:12px 0;color:#7A5010;font-size:11px;letter-spacing:0.15em;text-transform:uppercase;width:120px">${k}</td><td style="padding:12px 0;color:#1C1610;font-size:16px">${v}</td></tr>`).join('')}</table>${description?`<div style="margin-top:24px;padding:20px;background:#EAE3D6;border-left:3px solid #7A5010"><div style="color:#7A5010;font-size:11px;letter-spacing:0.15em;text-transform:uppercase;margin-bottom:10px">Overview</div><div style="color:#2E2418;font-size:16px;line-height:1.7">${description}</div></div>`:''}</div>`
+      })),
+      sendAndLog('applicant-confirmation', () => resend.emails.send({
+        from: fromEmail,
+        to: contact_email,
+        replyTo: notificationEmail,
+        subject: confirmSubject,
+        html: `<div style="font-family:Georgia,serif;max-width:600px;margin:0 auto;padding:40px 20px;background:#F2ECE2"><div style="background:#1C1610;padding:24px 32px;margin-bottom:32px"><h2 style="color:#C8A040;margin:0;font-size:18px">Solventis Bankers & Advisors</h2><p style="color:#C8BCA8;margin:6px 0 0;font-size:11px;letter-spacing:0.2em;text-transform:uppercase">Investment Banking Advisory</p></div><p style="color:#1C1610;font-size:18px;line-height:1.75;margin-bottom:20px">Dear ${contact_name},</p><p style="color:#695C4C;font-size:17px;line-height:1.85;margin-bottom:20px">Thank you for reaching out to Solventis Bankers & Advisors. We have received your submission regarding <strong style="color:#1C1610">${company_name}</strong> and will review it personally.</p><p style="color:#695C4C;font-size:17px;line-height:1.85;margin-bottom:32px">If your transaction is a fit for our practice, we will reach out within two business days to schedule a confidential introductory conversation.</p><div style="border-top:1px solid rgba(100,70,18,0.2);padding-top:24px"><p style="color:#1C1610;font-size:15px;line-height:1.6;margin:0"><strong>Solventis Bankers & Advisors</strong><br/>801 Travis St, Suite 800 · Houston, TX 77002<br/><a href="tel:7135648192" style="color:#7A5010">713-564-8192</a> · <a href="https://solventisbaa.com" style="color:#7A5010">solventisbaa.com</a></p><p style="color:#8A7B6C;font-size:11px;margin-top:16px">Investment banking services provided through a registered representative of Finalis Securities LLC, Member FINRA/SIPC.</p></div></div>`
+      }))
+    ])
 
     // Only report success if the lead was captured through at least one reliable
     // channel (team notification or the database). If both failed, the lead is
