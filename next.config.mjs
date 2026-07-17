@@ -4,7 +4,7 @@ import defaultCache from 'next-pwa/cache.js'
 // next-pwa's default runtimeCaching ends with a catch-all rule that routes EVERY
 // cross-origin GET request through the service worker (cacheName: 'cross-origin').
 // When the browser loads the Cloudflare Turnstile script
-// (https://challenges.cloudflare.com/turnstile/api.js) via that SW-mediated
+// (https://challenges.cloudflare.com/turnstile/v0/api.js) via that SW-mediated
 // response, Chrome refuses to use it and reports
 // net::ERR_BLOCKED_BY_RESPONSE.NotSameOrigin — the widget script never runs, so
 // the iframe never renders and the form can't be submitted.

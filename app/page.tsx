@@ -95,7 +95,7 @@ export default function Home() {
     if (!script) {
       script = document.createElement('script')
       script.id = id
-      script.src = 'https://challenges.cloudflare.com/turnstile/api.js?render=explicit'
+      script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit'
       script.async = true
       script.defer = true
       document.head.appendChild(script)
