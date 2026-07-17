@@ -240,12 +240,19 @@ export async function POST(req: NextRequest) {
     const resend = getResend()
     const supabase = getSupabase()
 
-    supabase
+    // Persist the lead first, and AWAIT it — a DB failure must be visible and
+    // the lead reliably captured before we attempt (best-effort) notifications.
+    const { error: dbError } = await supabase
       .from('solventis_deals')
       .insert([{ company_name, industry, location, revenue_range, ebitda_range, transaction_type, timeline, description, contact_name, contact_title, contact_email, contact_phone, status: 'new' }])
-      .select().single().then(() => {}, console.error)
+    if (dbError) console.error('[submit] Supabase insert FAILED:', dbError)
+    else console.log('[submit] Lead saved to Supabase')
 
-    await Promise.all([
+    // Resend's SDK RESOLVES with { data, error } instead of throwing on API
+    // failures (unverified domain, invalid key, sandbox recipient limits, …),
+    // so we MUST inspect each result — otherwise a silently-rejected send still
+    // looks like success and no email ever arrives.
+    const [adminRes, confirmRes] = await Promise.all([
       resend.emails.send({
         from: process.env.FROM_EMAIL ?? 'info@solventisbaa.com',
         to: 'info@solventisbaa.com',
@@ -261,6 +268,21 @@ export async function POST(req: NextRequest) {
         html: `<div style="font-family:Georgia,serif;max-width:600px;margin:0 auto;padding:40px 20px;background:#F2ECE2"><div style="background:#1C1610;padding:24px 32px;margin-bottom:32px"><h2 style="color:#C8A040;margin:0;font-size:18px">Solventis Bankers & Advisors</h2><p style="color:#C8BCA8;margin:6px 0 0;font-size:11px;letter-spacing:0.2em;text-transform:uppercase">Investment Banking Advisory</p></div><p style="color:#1C1610;font-size:18px;line-height:1.75;margin-bottom:20px">Dear ${contact_name},</p><p style="color:#695C4C;font-size:17px;line-height:1.85;margin-bottom:20px">Thank you for reaching out to Solventis Bankers & Advisors. We have received your submission regarding <strong style="color:#1C1610">${company_name}</strong> and will review it personally.</p><p style="color:#695C4C;font-size:17px;line-height:1.85;margin-bottom:32px">If your transaction is a fit for our practice, we will reach out within two business days to schedule a confidential introductory conversation.</p><div style="border-top:1px solid rgba(100,70,18,0.2);padding-top:24px"><p style="color:#1C1610;font-size:15px;line-height:1.6;margin:0"><strong>Solventis Bankers & Advisors</strong><br/>801 Travis St, Suite 800 · Houston, TX 77002<br/><a href="tel:7135648192" style="color:#7A5010">713-564-8192</a> · <a href="https://solventisbaa.com" style="color:#7A5010">solventisbaa.com</a></p><p style="color:#8A7B6C;font-size:11px;margin-top:16px">Investment banking services provided through a registered representative of Finalis Securities LLC, Member FINRA/SIPC.</p></div></div>`
       })
     ])
+
+    if (adminRes.error) console.error('[submit] Admin notification email FAILED:', adminRes.error)
+    else console.log('[submit] Admin notification email sent, id:', adminRes.data?.id)
+    if (confirmRes.error) console.error('[submit] Applicant confirmation email FAILED:', confirmRes.error)
+    else console.log('[submit] Confirmation email sent, id:', confirmRes.data?.id)
+
+    // Only report success if the lead was captured through at least one reliable
+    // channel (team notification or the database). If both failed, the lead is
+    // lost — tell the user so they can retry instead of silently dropping it.
+    if (adminRes.error && dbError) {
+      return NextResponse.json(
+        { error: 'We could not process your submission. Please try again, or email info@solventisbaa.com directly.' },
+        { status: 502 }
+      )
+    }
 
     return NextResponse.json({ success: true })
   } catch (error) {
